@@ -3,17 +3,18 @@ package adf
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
-
 	"github.com/prebid/openrtb/v20/openrtb2"
 	"github.com/prebid/prebid-server/v2/adapters"
 	"github.com/prebid/prebid-server/v2/config"
 	"github.com/prebid/prebid-server/v2/errortypes"
 	"github.com/prebid/prebid-server/v2/openrtb_ext"
+	"net/http"
+	"slices"
 )
 
 type adapter struct {
-	endpoint string
+	endpoint         string
+	extraAdapterInfo map[string][]string
 }
 
 type adfRequestExt struct {
@@ -23,8 +24,15 @@ type adfRequestExt struct {
 
 // Builder builds a new instance of the Adf adapter for the given bidder with the given config.
 func Builder(bidderName openrtb_ext.BidderName, config config.Adapter, server config.Server) (adapters.Bidder, error) {
+
+	var unmarshalledExtraAdapterInfo map[string][]string
+	if err := json.Unmarshal([]byte(config.ExtraAdapterInfo), &unmarshalledExtraAdapterInfo); err != nil {
+		unmarshalledExtraAdapterInfo = make(map[string][]string)
+	}
+
 	bidder := &adapter{
-		endpoint: config.Endpoint,
+		endpoint:         config.Endpoint,
+		extraAdapterInfo: unmarshalledExtraAdapterInfo,
 	}
 	return bidder, nil
 }
@@ -33,8 +41,11 @@ func (a *adapter) MakeRequests(request *openrtb2.BidRequest, requestInfo *adapte
 	var errors []error
 	var validImps = make([]openrtb2.Imp, 0, len(request.Imp))
 	priceType := ""
+	suppressPbadslotDetails := getSuppressPbadslot(a.extraAdapterInfo)
 
 	for _, imp := range request.Imp {
+		imp.Ext = pbadslotEditor(imp.Ext, suppressPbadslotDetails, &errors)
+
 		var bidderExt adapters.ExtImpBidder
 		if err := json.Unmarshal(imp.Ext, &bidderExt); err != nil {
 			errors = append(errors, &errortypes.BadInput{
@@ -151,5 +162,56 @@ func getMediaTypeForBid(bid openrtb2.Bid) (openrtb_ext.BidType, error) {
 
 	return "", &errortypes.BadServerResponse{
 		Message: fmt.Sprintf("Failed to parse impression \"%s\" mediatype", bid.ImpID),
+	}
+}
+
+func getSuppressPbadslot(extraAdapterInfo map[string][]string) bool {
+	if value, keyExists := extraAdapterInfo["suppresskeywords"]; keyExists {
+		if slices.Contains(value, "pbadslot") {
+			return true
+		}
+	}
+	return false
+}
+
+func pbadslotEditor(extContent json.RawMessage, suppressPbadslotdetails bool, errors *[]error) json.RawMessage {
+	if !suppressPbadslotdetails {
+		return extContent
+	}
+
+	var marshalledEditedExtContent []byte
+
+	var unmarshalledExtContent map[string]json.RawMessage
+	var unmarshalledData map[string]json.RawMessage
+	replacementPerformed := false
+
+	if err := json.Unmarshal(extContent, &unmarshalledExtContent); err != nil {
+		*errors = append(*errors, &errortypes.BadInput{
+			Message: err.Error(),
+		})
+		return extContent
+	}
+
+	if dataVal, ok := unmarshalledExtContent["data"]; ok {
+		if err := json.Unmarshal(dataVal, &unmarshalledData); err != nil {
+			*errors = append(*errors, &errortypes.BadInput{
+				Message: err.Error(),
+			})
+			return extContent
+		}
+
+		if _, ok := unmarshalledData["pbadslot"]; ok {
+			delete(unmarshalledData, "pbadslot")
+			marshalledEditedData, _ := json.Marshal(unmarshalledData)
+			unmarshalledExtContent["data"] = marshalledEditedData
+			marshalledEditedExtContent, _ = json.Marshal(unmarshalledExtContent)
+			replacementPerformed = true
+		}
+	}
+
+	if replacementPerformed {
+		return marshalledEditedExtContent
+	} else {
+		return extContent
 	}
 }

@@ -25,3 +25,4 @@ userSync:
   redirect:
     url: "https://cm.adform.net/cookie?redirect_url={{.RedirectURL}}"
     userMacro: "$UID"
+extra_info: "{\"suppresskeywords\":[\"pbadslot\", \"otherkey\"]}"
